@@ -45,30 +45,6 @@ class AppState: ObservableObject {
     }
     
     func startSession() {
-        // Explicitly test screen capture to see if we ACTUALLY have permission
-        let testImage = takeScreenshot()
-        
-        // When permission is denied, CGWindowListCreateImage either returns nil,
-        // or it returns an image that only contains the desktop wallpaper/menu bar,
-        // but we can't easily check pixel content.
-        // If we don't have access, CGPreflightScreenCaptureAccess is officially the way,
-        // but it's buggy. We'll trigger the prompt if needed, but we MUST ensure we can get an image.
-        
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
-            DispatchQueue.main.async {
-                self.connectionStatus = "⚠️ Screen Recording permission required! Please toggle it ON in System Settings -> Privacy & Security, then restart the app."
-            }
-            return
-        }
-        
-        guard testImage != nil else {
-            DispatchQueue.main.async {
-                self.connectionStatus = "❌ Failed to capture screen. Please check permissions."
-            }
-            return
-        }
-        
         DispatchQueue.main.async {
             self.connectionStatus = "Recording started."
         }
