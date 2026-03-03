@@ -1,116 +1,369 @@
 import SwiftUI
-import Carbon
+import Charts
+import ApplicationServices
+import Foundation
 
-class TimerState: ObservableObject {
-    @Published var isRunning = false
-    @Published var elapsedTime: TimeInterval = 0
-    @Published var maxTime: TimeInterval = UserDefaults.standard.double(forKey: "maxAttentionTime")
+// MARK: - Models
+
+struct FocusDataPoint: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let isFocused: Bool
+}
+
+enum AIProvider: String, CaseIterable, Identifiable {
+    case openai = "OpenAI (GPT-4o)"
+    case anthropic = "Anthropic (Claude 3.5)"
+    case gemini = "Google (Gemini 1.5 Flash)"
+    var id: String { self.rawValue }
+}
+
+// MARK: - App State
+
+class AppState: ObservableObject {
+    @Published var agenda: String = UserDefaults.standard.string(forKey: "savedAgenda") ?? ""
+    @Published var selectedProvider: AIProvider = .gemini
+    @Published var apiKey: String = UserDefaults.standard.string(forKey: "savedApiKey") ?? ""
     
-    private var startTime: Date?
+    @Published var isTracking: Bool = false
+    @Published var isDistracted: Bool = false
+    @Published var history: [FocusDataPoint] = []
+    
+    @Published var sessionStartTime: Date?
+    @Published var elapsedTime: TimeInterval = 0
+    
     private var timer: Timer?
-
-    init() {
-        HotKeyManager.shared.action = { [weak self] in
-            self?.toggleTimer()
-        }
-        HotKeyManager.shared.register()
+    private var analysisTimer: Timer?
+    
+    func saveSettings() {
+        UserDefaults.standard.set(agenda, forKey: "savedAgenda")
+        UserDefaults.standard.set(apiKey, forKey: "savedApiKey")
     }
-
-    func toggleTimer() {
-        if isRunning {
-            isRunning = false
-            timer?.invalidate()
-            timer = nil
-            if elapsedTime > maxTime {
-                maxTime = elapsedTime
-                UserDefaults.standard.set(maxTime, forKey: "maxAttentionTime")
-            }
-        } else {
-            isRunning = true
-            elapsedTime = 0
-            startTime = Date()
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                guard let self = self, let start = self.startTime else { return }
-                self.elapsedTime = Date().timeIntervalSince(start)
-            }
-            if let timer = timer {
-                RunLoop.main.add(timer, forMode: .common)
+    
+    func startSession() {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            return
+        }
+        
+        saveSettings()
+        isTracking = true
+        isDistracted = false
+        history = []
+        sessionStartTime = Date()
+        elapsedTime = 0
+        
+        history.append(FocusDataPoint(timestamp: Date(), isFocused: true)) // Start focused
+        
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self, let start = self.sessionStartTime else { return }
+            self.elapsedTime = Date().timeIntervalSince(start)
+        }
+        RunLoop.main.add(timer!, forMode: .common)
+        
+        // Take a screenshot and analyze every 20 seconds
+        analysisTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+            self?.performAnalysis()
+        }
+    }
+    
+    func stopSession() {
+        isTracking = false
+        timer?.invalidate()
+        timer = nil
+        analysisTimer?.invalidate()
+        analysisTimer = nil
+    }
+    
+    func performAnalysis() {
+        guard let image = takeScreenshot(), let jpegData = image.jpegData(compressionQuality: 0.5) else { return }
+        
+        Task {
+            do {
+                let isFocused = try await AIManager.evaluateFocus(
+                    provider: selectedProvider,
+                    apiKey: apiKey,
+                    agenda: agenda,
+                    imageData: jpegData
+                )
+                
+                DispatchQueue.main.async {
+                    self.history.append(FocusDataPoint(timestamp: Date(), isFocused: isFocused))
+                    if !isFocused {
+                        self.isDistracted = true
+                        self.stopSession()
+                    }
+                }
+            } catch {
+                print("Analysis failed: \(error)")
+                // Optionally handle errors, e.g., stop tracking or just ignore one failed request
             }
         }
     }
+    
+    private func takeScreenshot() -> NSImage? {
+        // Capture main display
+        guard let cgImage = CGWindowListCreateImage(CGRect.infinite, .optionOnScreenOnly, kCGNullWindowID, .nominalResolution) else { return nil }
+        return NSImage(cgImage: cgImage, size: .zero)
+    }
+}
 
-    func formatTime(_ interval: TimeInterval) -> String {
-        let hours = Int(interval) / 3600
-        let minutes = (Int(interval) % 3600) / 60
-        let seconds = Int(interval) % 60
-        if hours > 0 {
-            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        } else {
-            return String(format: "%02d:%02d", minutes, seconds)
+// MARK: - Extension for NSImage
+extension NSImage {
+    func jpegData(compressionQuality: CGFloat) -> Data? {
+        guard let tiffRepresentation = tiffRepresentation,
+              let bitmapImage = NSBitmapImageRep(data: tiffRepresentation) else { return nil }
+        return bitmapImage.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality])
+    }
+}
+
+// MARK: - AI Manager
+
+class AIManager {
+    static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> Bool {
+        let base64 = imageData.base64EncodedString()
+        let prompt = "You are an AI tracking a user's focus. The user's goal/agenda is: '\(agenda)'. Look at this screenshot of their computer. Are they working on their agenda? Consider reading documentation, coding, writing relevant text, etc. as working. Consider social media, unrelated YouTube videos, or unrelated articles as distracted. Reply with EXACTLY ONE WORD: 'FOCUSED' or 'DISTRACTED'."
+        
+        var request: URLRequest
+        
+        switch provider {
+        case .openai:
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "model": "gpt-4o",
+                "messages": [
+                    [
+                        "role": "user",
+                        "content": [
+                            ["type": "text", "text": prompt],
+                            ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]]
+                        ]
+                    ]
+                ],
+                "max_tokens": 10
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            
+        case .gemini:
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
+            request.httpMethod = "POST"
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "contents": [
+                    [
+                        "parts": [
+                            ["text": prompt],
+                            ["inline_data": ["mime_type": "image/jpeg", "data": base64]]
+                        ]
+                    ]
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            
+        case .anthropic:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.httpMethod = "POST"
+            request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 10,
+                "messages": [
+                    [
+                        "role": "user",
+                        "content": [
+                            ["type": "text", "text": prompt],
+                            ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64]]
+                        ]
+                    ]
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let responseString = String(data: data, encoding: .utf8) ?? ""
+        
+        // Simple string matching to see if the AI replied with FOCUSED or DISTRACTED
+        if responseString.localizedCaseInsensitiveContains("DISTRACTED") {
+            return false
+        }
+        return true
+    }
+}
+
+// MARK: - Views
+
+struct ContentView: View {
+    @StateObject private var appState = AppState()
+    
+    var body: some View {
+        VStack {
+            if appState.isTracking || appState.isDistracted {
+                TrackingView(appState: appState)
+            } else {
+                SetupView(appState: appState)
+            }
+        }
+        .frame(minWidth: 400, minHeight: 350)
+        .padding()
+    }
+}
+
+struct SetupView: View {
+    @ObservedObject var appState: AppState
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("AI Focus Tracker")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("What is your agenda for this session?")
+                    .font(.headline)
+                TextField("e.g. Learning CLI tools from Missing Semester", text: $appState.agenda)
+                    .textFieldStyle(.roundedBorder)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("AI Provider")
+                    .font(.headline)
+                Picker("", selection: $appState.selectedProvider) {
+                    ForEach(AIProvider.allCases) { provider in
+                        Text(provider.rawValue).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("API Key")
+                    .font(.headline)
+                SecureField("Enter your API key", text: $appState.apiKey)
+                    .textFieldStyle(.roundedBorder)
+            }
+            
+            Spacer()
+            
+            HStack {
+                Spacer()
+                Button(action: {
+                    appState.startSession()
+                }) {
+                    Text("Start Session")
+                        .font(.title3)
+                        .fontWeight(.bold)
+                        .padding(.horizontal, 40)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(appState.agenda.isEmpty || appState.apiKey.isEmpty)
+                Spacer()
+            }
         }
     }
 }
 
-class HotKeyManager {
-    static let shared = HotKeyManager()
-    var action: (() -> Void)?
+struct TrackingView: View {
+    @ObservedObject var appState: AppState
     
-    func register() {
-        let keyCode: UInt32 = 17 // kVK_ANSI_T
-        let modifiers: UInt32 = 256 | 2048 // cmdKey | optionKey
-        
-        var hotKeyID = EventHotKeyID(signature: 0x5349474E, id: 1) // 'SIGN'
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        
-        let ptr = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
-        
-        InstallEventHandler(GetApplicationEventTarget(), { (nextHandler, theEvent, userData) -> OSStatus in
-            guard let userData = userData else { return noErr }
-            let manager = Unmanaged<HotKeyManager>.fromOpaque(userData).takeUnretainedValue()
-            DispatchQueue.main.async {
-                manager.action?()
+    var body: some View {
+        VStack(spacing: 20) {
+            if appState.isDistracted {
+                Text("DISTRACTED!")
+                    .font(.system(size: 40, weight: .black))
+                    .foregroundColor(.red)
+                
+                Text("Your session was stopped because you lost focus.")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+            } else {
+                Text("FOCUSED")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundColor(.green)
+                
+                Text("Monitoring: \(appState.agenda)")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
-            return noErr
-        }, 1, &eventType, ptr, nil)
-        
-        var hotKeyRef: EventHotKeyRef?
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+            
+            Text(formatTime(appState.elapsedTime))
+                .font(.system(size: 60, weight: .bold, design: .monospaced))
+                .monospacedDigit()
+            
+            if !appState.history.isEmpty {
+                Chart {
+                    ForEach(appState.history) { point in
+                        LineMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Focus", point.isFocused ? 1 : 0)
+                        )
+                        .interpolationMethod(.stepStart)
+                        
+                        AreaMark(
+                            x: .value("Time", point.timestamp),
+                            y: .value("Focus", point.isFocused ? 1 : 0)
+                        )
+                        .interpolationMethod(.stepStart)
+                        .foregroundStyle(
+                            LinearGradient(
+                                gradient: Gradient(colors: [.blue.opacity(0.5), .clear]),
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                    }
+                }
+                .frame(height: 100)
+                .chartYAxis {
+                    AxisMarks(values: [0, 1]) { value in
+                        AxisValueLabel {
+                            if let intVal = value.as(Int.self) {
+                                Text(intVal == 1 ? "Focused" : "Distracted")
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                appState.stopSession()
+                // Reset state to go back to Setup
+                appState.isTracking = false
+                appState.isDistracted = false
+            }) {
+                Text(appState.isDistracted ? "Start New Session" : "Stop Session Manually")
+                    .fontWeight(.semibold)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(appState.isDistracted ? .blue : .red)
+        }
+    }
+    
+    func formatTime(_ interval: TimeInterval) -> String {
+        let minutes = (Int(interval) % 3600) / 60
+        let seconds = Int(interval) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
     }
 }
 
 @main
 struct SignalTrackApp: App {
-    @StateObject private var timerState = TimerState()
-
     var body: some Scene {
-        MenuBarExtra {
-            VStack {
-                Text("PEAK FOCUS: \(timerState.formatTime(timerState.maxTime))")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                
-                Divider()
-                
-                Button(timerState.isRunning ? "Stop (⌥⌘T)" : "Start (⌥⌘T)") {
-                    timerState.toggleTimer()
-                }
-                
-                Divider()
-                
-                Button("Quit SignalTrack") {
-                    NSApplication.shared.terminate(nil)
-                }
-            }
-        } label: {
-            HStack {
-                if timerState.isRunning {
-                    Image(systemName: "timer")
-                        .foregroundColor(.green)
-                } else {
-                    Image(systemName: "timer")
-                }
-                Text(timerState.formatTime(timerState.elapsedTime))
-                    .monospacedDigit()
-            }
+        WindowGroup {
+            ContentView()
         }
+        .windowResizability(.contentSize)
     }
 }
