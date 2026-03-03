@@ -45,12 +45,8 @@ class AppState: ObservableObject {
     }
     
     func startSession() {
-        guard CGPreflightScreenCaptureAccess() else {
+        if !CGPreflightScreenCaptureAccess() {
             CGRequestScreenCaptureAccess()
-            DispatchQueue.main.async {
-                self.connectionStatus = "⚠️ Screen Recording access required. Please grant it in System Settings -> Privacy & Security, then click Start Session again."
-            }
-            return
         }
         
         saveSettings()
@@ -68,8 +64,8 @@ class AppState: ObservableObject {
         }
         RunLoop.main.add(timer!, forMode: .common)
         
-        // Take a screenshot and analyze every 20 seconds
-        analysisTimer = Timer.scheduledTimer(withTimeInterval: 20.0, repeats: true) { [weak self] _ in
+        // Take a screenshot and analyze every 5 seconds
+        analysisTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.performAnalysis()
         }
     }
@@ -230,7 +226,7 @@ class AIManager {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
         case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=\(apiKey)")!)
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-preview:generateContent?key=\(apiKey)")!)
             request.httpMethod = "POST"
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
@@ -269,8 +265,19 @@ class AIManager {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         let responseString = String(data: data, encoding: .utf8) ?? ""
+        
+        let logText = "Status: \((response as? HTTPURLResponse)?.statusCode ?? 0)\nResponse: \(responseString)\n\n"
+        let logPath = "/Users/atharvkotekar/Desktop/SignalTrack/SignalTrack_AILogs.txt"
+        let logURL = URL(fileURLWithPath: logPath)
+        if let fileHandle = try? FileHandle(forWritingTo: logURL) {
+            fileHandle.seekToEndOfFile()
+            if let data = logText.data(using: .utf8) { fileHandle.write(data) }
+            try? fileHandle.close()
+        } else {
+            try? logText.write(to: logURL, atomically: true, encoding: .utf8)
+        }
         
         // Simple string matching to see if the AI replied with FOCUSED or DISTRACTED
         if responseString.localizedCaseInsensitiveContains("DISTRACTED") {
