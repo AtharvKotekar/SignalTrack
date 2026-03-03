@@ -226,7 +226,7 @@ class AIManager {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
         case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-preview:generateContent?key=\(apiKey)")!)
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\(apiKey)")!)
             request.httpMethod = "POST"
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
