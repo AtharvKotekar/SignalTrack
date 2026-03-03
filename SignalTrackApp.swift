@@ -86,23 +86,20 @@ class AppState: ObservableObject {
         
         Task {
             do {
-                let success = try await AIManager.testConnection(provider: selectedProvider, apiKey: apiKey)
+                let (success, message) = try await AIManager.testConnection(provider: selectedProvider, apiKey: apiKey)
                 DispatchQueue.main.async {
                     self.isTestingConnection = false
+                    self.isConnectionVerified = success
+                    self.connectionStatus = message
                     if success {
-                        self.isConnectionVerified = true
-                        self.connectionStatus = "Connection successful! ✅"
                         self.saveSettings()
-                    } else {
-                        self.isConnectionVerified = false
-                        self.connectionStatus = "Connection failed. Please check your API key."
                     }
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.isTestingConnection = false
                     self.isConnectionVerified = false
-                    self.connectionStatus = "Connection error: \(error.localizedDescription)"
+                    self.connectionStatus = "Error: \(error.localizedDescription)"
                 }
             }
         }
@@ -153,43 +150,22 @@ extension NSImage {
 // MARK: - AI Manager
 
 class AIManager {
-    static func testConnection(provider: AIProvider, apiKey: String) async throws -> Bool {
-        let prompt = "Reply with 'OK'."
+    static func testConnection(provider: AIProvider, apiKey: String) async throws -> (Bool, String) {
         var request: URLRequest
         
         switch provider {
         case .openai:
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-            request.httpMethod = "POST"
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+            request.httpMethod = "GET"
             request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            let body: [String: Any] = [
-                "model": "gpt-5.2",
-                "messages": [
-                    ["role": "user", "content": prompt]
-                ],
-                "max_tokens": 5
-            ]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
         case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=\(apiKey)")!)
-            request.httpMethod = "POST"
-            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            let body: [String: Any] = [
-                "contents": [
-                    [
-                        "parts": [
-                            ["text": prompt]
-                        ]
-                    ]
-                ]
-            ]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            // Test models listing to verify the key.
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(apiKey)")!)
+            request.httpMethod = "GET"
             
         case .anthropic:
+            // Note: Anthropic doesn't have a simple GET /models, so we'll do a small, minimal generation.
             request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
             request.httpMethod = "POST"
             request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -197,20 +173,29 @@ class AIManager {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
             let body: [String: Any] = [
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 5,
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 1,
                 "messages": [
-                    ["role": "user", "content": prompt]
+                    ["role": "user", "content": "Hi"]
                 ]
             ]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         
-        let (_, response) = try await URLSession.shared.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
-            return true
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse {
+                if (200...299).contains(httpResponse.statusCode) {
+                    return (true, "Connection successful! ✅")
+                } else {
+                    let errStr = String(data: data, encoding: .utf8) ?? "Unknown Error"
+                    return (false, "HTTP \(httpResponse.statusCode): \(errStr)")
+                }
+            }
+            return (false, "Invalid response from server.")
+        } catch {
+            return (false, error.localizedDescription)
         }
-        return false
     }
 
     static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> Bool {
