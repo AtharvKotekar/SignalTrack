@@ -9,6 +9,7 @@ struct FocusDataPoint: Identifiable {
     let id = UUID()
     let timestamp: Date
     let isFocused: Bool
+    let note: String
 }
 
 enum AIProvider: String, CaseIterable, Identifiable {
@@ -28,6 +29,7 @@ class AppState: ObservableObject {
     @Published var isTracking: Bool = false
     @Published var isDistracted: Bool = false
     @Published var history: [FocusDataPoint] = []
+    @Published var latestObservation: String = "Starting session..."
     
     @Published var sessionStartTime: Date?
     @Published var elapsedTime: TimeInterval = 0
@@ -55,8 +57,9 @@ class AppState: ObservableObject {
         history = []
         sessionStartTime = Date()
         elapsedTime = 0
+        latestObservation = "Starting session..."
         
-        history.append(FocusDataPoint(timestamp: Date(), isFocused: true)) // Start focused
+        history.append(FocusDataPoint(timestamp: Date(), isFocused: true, note: "Session started")) // Start focused
         
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             guard let self = self, let start = self.sessionStartTime else { return }
@@ -109,7 +112,7 @@ class AppState: ObservableObject {
         
         Task {
             do {
-                let isFocused = try await AIManager.evaluateFocus(
+                let (isFocused, note) = try await AIManager.evaluateFocus(
                     provider: selectedProvider,
                     apiKey: apiKey,
                     agenda: agenda,
@@ -117,7 +120,8 @@ class AppState: ObservableObject {
                 )
                 
                 DispatchQueue.main.async {
-                    self.history.append(FocusDataPoint(timestamp: Date(), isFocused: isFocused))
+                    self.latestObservation = note
+                    self.history.append(FocusDataPoint(timestamp: Date(), isFocused: isFocused, note: note))
                     if !isFocused {
                         self.isDistracted = true
                         self.stopSession()
@@ -125,7 +129,6 @@ class AppState: ObservableObject {
                 }
             } catch {
                 print("Analysis failed: \(error)")
-                // Optionally handle errors, e.g., stop tracking or just ignore one failed request
             }
         }
     }
@@ -197,9 +200,21 @@ class AIManager {
         }
     }
 
-    static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> Bool {
+    static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> (Bool, String) {
         let base64 = imageData.base64EncodedString()
-        let prompt = "You are an AI tracking a user's focus. The user's goal/agenda is: '\(agenda)'. Look at this screenshot of their computer. Are they working on their agenda? Consider reading documentation, coding, writing relevant text, etc. as working. Consider social media, unrelated YouTube videos, or unrelated articles as distracted. Reply with EXACTLY ONE WORD: 'FOCUSED' or 'DISTRACTED'."
+        let prompt = """
+        You are an AI tracking a user's focus. The user's goal/agenda is: '\(agenda)'.
+        Look at this screenshot of their computer. Are they working on their agenda?
+        Consider reading documentation, coding, writing relevant text, watching tutorials specifically about the agenda as working.
+        Consider social media (like Twitter, Instagram), unrelated YouTube videos, or unrelated articles as distracted.
+        
+        You must reply with a valid JSON object matching this exact schema:
+        {
+            "status": "FOCUSED" or "DISTRACTED",
+            "observation": "A short, 1-sentence description of exactly what the user is doing on screen right now (e.g. 'Watching a YouTube video about React', 'Scrolling through Twitter feed', 'Reading API documentation')."
+        }
+        Reply ONLY with the raw JSON object, no markdown formatting or backticks.
+        """
         
         var request: URLRequest
         
@@ -221,7 +236,7 @@ class AIManager {
                         ]
                     ]
                 ],
-                "max_tokens": 10
+                "max_tokens": 150
             ]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
@@ -251,7 +266,7 @@ class AIManager {
             
             let body: [String: Any] = [
                 "model": "claude-sonnet-4-6",
-                "max_tokens": 10,
+                "max_tokens": 150,
                 "messages": [
                     [
                         "role": "user",
@@ -279,11 +294,69 @@ class AIManager {
             try? logText.write(to: logURL, atomically: true, encoding: .utf8)
         }
         
-        // Simple string matching to see if the AI replied with FOCUSED or DISTRACTED
-        if responseString.localizedCaseInsensitiveContains("DISTRACTED") {
-            return false
+        // Extract JSON string from response depending on the provider format
+        var extractedJSON = ""
+        
+        switch provider {
+        case .openai:
+            if let data = responseString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = json["choices"] as? [[String: Any]],
+               let first = choices.first,
+               let message = first["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                extractedJSON = content
+            }
+        case .gemini:
+            if let data = responseString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let candidates = json["candidates"] as? [[String: Any]],
+               let first = candidates.first,
+               let content = first["content"] as? [String: Any],
+               let parts = content["parts"] as? [[String: Any]],
+               let firstPart = parts.first,
+               let text = firstPart["text"] as? String {
+                extractedJSON = text
+            }
+        case .anthropic:
+            if let data = responseString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let content = json["content"] as? [[String: Any]],
+               let first = content.first,
+               let text = first["text"] as? String {
+                extractedJSON = text
+            }
         }
-        return true
+        
+        // Clean up markdown block if the model returned it
+        extractedJSON = extractedJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        if extractedJSON.hasPrefix("```json") {
+            extractedJSON = String(extractedJSON.dropFirst(7))
+        } else if extractedJSON.hasPrefix("```") {
+            extractedJSON = String(extractedJSON.dropFirst(3))
+        }
+        if extractedJSON.hasSuffix("```") {
+            extractedJSON = String(extractedJSON.dropLast(3))
+        }
+        
+        var isFocused = true
+        var observation = "Observing..."
+        
+        if let data = extractedJSON.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let status = json["status"] as? String {
+                isFocused = !status.localizedCaseInsensitiveContains("DISTRACTED")
+            }
+            if let obs = json["observation"] as? String {
+                observation = obs
+            }
+        } else {
+            // Fallback if parsing fails
+            isFocused = !extractedJSON.localizedCaseInsensitiveContains("DISTRACTED")
+            observation = "Could not parse detailed observation."
+        }
+        
+        return (isFocused, observation)
     }
 }
 
@@ -409,6 +482,21 @@ struct TrackingView: View {
             Text(formatTime(appState.elapsedTime))
                 .font(.system(size: 60, weight: .bold, design: .monospaced))
                 .monospacedDigit()
+                
+            VStack(spacing: 4) {
+                Text("AI OBSERVATION:")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundColor(.secondary)
+                Text(appState.latestObservation)
+                    .font(.subheadline)
+                    .italic()
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
+            .padding(.vertical, 8)
+            .background(Color.secondary.opacity(0.1))
+            .cornerRadius(8)
             
             if !appState.history.isEmpty {
                 Chart {
