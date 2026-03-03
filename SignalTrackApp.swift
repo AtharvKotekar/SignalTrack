@@ -32,6 +32,10 @@ class AppState: ObservableObject {
     @Published var sessionStartTime: Date?
     @Published var elapsedTime: TimeInterval = 0
     
+    @Published var isTestingConnection: Bool = false
+    @Published var connectionStatus: String = ""
+    @Published var isConnectionVerified: Bool = false
+    
     private var timer: Timer?
     private var analysisTimer: Timer?
     
@@ -73,6 +77,35 @@ class AppState: ObservableObject {
         timer = nil
         analysisTimer?.invalidate()
         analysisTimer = nil
+    }
+    
+    func testAPIConnection() {
+        guard !apiKey.isEmpty else { return }
+        isTestingConnection = true
+        connectionStatus = "Testing connection..."
+        
+        Task {
+            do {
+                let success = try await AIManager.testConnection(provider: selectedProvider, apiKey: apiKey)
+                DispatchQueue.main.async {
+                    self.isTestingConnection = false
+                    if success {
+                        self.isConnectionVerified = true
+                        self.connectionStatus = "Connection successful! ✅"
+                        self.saveSettings()
+                    } else {
+                        self.isConnectionVerified = false
+                        self.connectionStatus = "Connection failed. Please check your API key."
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isTestingConnection = false
+                    self.isConnectionVerified = false
+                    self.connectionStatus = "Connection error: \(error.localizedDescription)"
+                }
+            }
+        }
     }
     
     func performAnalysis() {
@@ -120,6 +153,66 @@ extension NSImage {
 // MARK: - AI Manager
 
 class AIManager {
+    static func testConnection(provider: AIProvider, apiKey: String) async throws -> Bool {
+        let prompt = "Reply with 'OK'."
+        var request: URLRequest
+        
+        switch provider {
+        case .openai:
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "model": "gpt-4o",
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ],
+                "max_tokens": 5
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            
+        case .gemini:
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
+            request.httpMethod = "POST"
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "contents": [
+                    [
+                        "parts": [
+                            ["text": prompt]
+                        ]
+                    ]
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            
+        case .anthropic:
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.httpMethod = "POST"
+            request.addValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.addValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+            
+            let body: [String: Any] = [
+                "model": "claude-3-5-sonnet-20241022",
+                "max_tokens": 5,
+                "messages": [
+                    ["role": "user", "content": prompt]
+                ]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        }
+        
+        let (_, response) = try await URLSession.shared.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+            return true
+        }
+        return false
+    }
+
     static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> Bool {
         let base64 = imageData.base64EncodedString()
         let prompt = "You are an AI tracking a user's focus. The user's goal/agenda is: '\(agenda)'. Look at this screenshot of their computer. Are they working on their agenda? Consider reading documentation, coding, writing relevant text, etc. as working. Consider social media, unrelated YouTube videos, or unrelated articles as distracted. Reply with EXACTLY ONE WORD: 'FOCUSED' or 'DISTRACTED'."
@@ -249,23 +342,45 @@ struct SetupView: View {
                     .font(.headline)
                 SecureField("Enter your API key", text: $appState.apiKey)
                     .textFieldStyle(.roundedBorder)
+                    .onChange(of: appState.apiKey) { _ in appState.isConnectionVerified = false; appState.connectionStatus = "" }
+            }
+            .onChange(of: appState.selectedProvider) { _ in appState.isConnectionVerified = false; appState.connectionStatus = "" }
+            
+            if !appState.connectionStatus.isEmpty {
+                Text(appState.connectionStatus)
+                    .font(.subheadline)
+                    .foregroundColor(appState.isConnectionVerified ? .green : (appState.isTestingConnection ? .blue : .red))
             }
             
             Spacer()
             
             HStack {
                 Spacer()
-                Button(action: {
-                    appState.startSession()
-                }) {
-                    Text("Start Session")
-                        .font(.title3)
-                        .fontWeight(.bold)
-                        .padding(.horizontal, 40)
-                        .padding(.vertical, 10)
+                if !appState.isConnectionVerified {
+                    Button(action: {
+                        appState.testAPIConnection()
+                    }) {
+                        Text(appState.isTestingConnection ? "Testing..." : "Test Connection")
+                            .font(.title3)
+                            .fontWeight(.bold)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(appState.apiKey.isEmpty || appState.isTestingConnection)
+                } else {
+                    Button(action: {
+                        appState.startSession()
+                    }) {
+                        Text("Start Session")
+                            .font(.title3)
+                            .fontWeight(.bold)
+                            .padding(.horizontal, 40)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(appState.agenda.isEmpty)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(appState.agenda.isEmpty || appState.apiKey.isEmpty)
                 Spacer()
             }
         }
