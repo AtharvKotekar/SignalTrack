@@ -49,9 +49,14 @@ class AppState: ObservableObject {
         if !hasAccess {
             CGRequestScreenCaptureAccess()
             DispatchQueue.main.async {
-                self.connectionStatus = "⚠️ Screen Recording access denied. Please grant it in System Settings -> Privacy & Security, then click Start Session again."
+                self.connectionStatus = "⚠️ TCC Bug: macOS says permission denied. If you already granted it, ignore this warning! Starting anyway..."
             }
-            return // Explicitly prevent the session from starting
+            // Removing the `return` so the user is not completely blocked from starting
+            // if macOS is falsely reporting the permission status.
+        } else {
+            DispatchQueue.main.async {
+                self.connectionStatus = "Recording started."
+            }
         }
         
         saveSettings()
