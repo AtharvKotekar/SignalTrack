@@ -47,6 +47,9 @@ class AppState: ObservableObject {
     func startSession() {
         guard CGPreflightScreenCaptureAccess() else {
             CGRequestScreenCaptureAccess()
+            DispatchQueue.main.async {
+                self.connectionStatus = "⚠️ Screen Recording access required. Please grant it in System Settings -> Privacy & Security, then click Start Session again."
+            }
             return
         }
         
@@ -334,7 +337,7 @@ struct SetupView: View {
             if !appState.connectionStatus.isEmpty {
                 Text(appState.connectionStatus)
                     .font(.subheadline)
-                    .foregroundColor(appState.isConnectionVerified ? .green : (appState.isTestingConnection ? .blue : .red))
+                    .foregroundColor(appState.connectionStatus.contains("⚠️") ? .orange : (appState.isConnectionVerified ? .green : (appState.isTestingConnection ? .blue : .red)))
             }
             
             Spacer()
