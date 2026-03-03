@@ -12,9 +12,9 @@ struct FocusDataPoint: Identifiable {
 }
 
 enum AIProvider: String, CaseIterable, Identifiable {
-    case openai = "OpenAI (GPT-4o)"
-    case anthropic = "Anthropic (Claude 3.5)"
-    case gemini = "Google (Gemini 1.5 Flash)"
+    case openai = "OpenAI (GPT-5.2)"
+    case anthropic = "Anthropic (Claude 4.6)"
+    case gemini = "Google (Gemini 3.1)"
     var id: String { self.rawValue }
 }
 
@@ -165,7 +165,7 @@ class AIManager {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
             let body: [String: Any] = [
-                "model": "gpt-4o",
+                "model": "gpt-5.2",
                 "messages": [
                     ["role": "user", "content": prompt]
                 ],
@@ -174,7 +174,7 @@ class AIManager {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
         case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=\(apiKey)")!)
             request.httpMethod = "POST"
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
@@ -197,7 +197,7 @@ class AIManager {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
             let body: [String: Any] = [
-                "model": "claude-3-5-sonnet-20241022",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 5,
                 "messages": [
                     ["role": "user", "content": prompt]
@@ -227,7 +227,7 @@ class AIManager {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
             let body: [String: Any] = [
-                "model": "gpt-4o",
+                "model": "gpt-5.2",
                 "messages": [
                     [
                         "role": "user",
@@ -242,7 +242,7 @@ class AIManager {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             
         case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
+            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=\(apiKey)")!)
             request.httpMethod = "POST"
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
@@ -266,7 +266,7 @@ class AIManager {
             request.addValue("application/json", forHTTPHeaderField: "Content-Type")
             
             let body: [String: Any] = [
-                "model": "claude-3-5-sonnet-20241022",
+                "model": "claude-sonnet-4-6",
                 "max_tokens": 10,
                 "messages": [
                     [
