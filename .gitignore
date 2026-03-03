@@ -1,0 +1,5 @@
+# Build artifacts
+SignalTrack.app/
+*.o
+*.swp
+.DS_Store
