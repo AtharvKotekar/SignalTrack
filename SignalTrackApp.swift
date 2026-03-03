@@ -45,8 +45,13 @@ class AppState: ObservableObject {
     }
     
     func startSession() {
-        if !CGPreflightScreenCaptureAccess() {
+        let hasAccess = CGPreflightScreenCaptureAccess()
+        if !hasAccess {
             CGRequestScreenCaptureAccess()
+            DispatchQueue.main.async {
+                self.connectionStatus = "⚠️ Screen Recording access denied. Please grant it in System Settings -> Privacy & Security, then click Start Session again."
+            }
+            return // Explicitly prevent the session from starting
         }
         
         saveSettings()
