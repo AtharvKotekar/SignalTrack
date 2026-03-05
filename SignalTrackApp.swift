@@ -203,15 +203,18 @@ class AIManager {
     static func evaluateFocus(provider: AIProvider, apiKey: String, agenda: String, imageData: Data) async throws -> (Bool, String) {
         let base64 = imageData.base64EncodedString()
         let prompt = """
-        You are an AI tracking a user's focus. The user's goal/agenda is: '\(agenda)'.
+        You are an AI tracking a user's focus. The user's core agenda is: '\(agenda)'.
         Look at this screenshot of their computer. Are they working on their agenda?
-        Consider reading documentation, coding, writing relevant text, watching tutorials specifically about the agenda as working.
-        Consider social media (like Twitter, Instagram), unrelated YouTube videos, or unrelated articles as distracted.
+        
+        CRITICAL: The user's workflow might involve multiple related apps.
+        - If the agenda is coding/development, using a Terminal, an IDE (VSCode, Xcode), reading documentation, or searching StackOverflow/Google for related errors is considered FOCUSED.
+        - If the agenda involves learning, watching a relevant YouTube video or reading a tutorial is considered FOCUSED.
+        - Only consider them DISTRACTED if they are clearly doing something unrelated (e.g., scrolling Twitter, Instagram, watching unrelated entertainment on YouTube, playing a game, etc.).
         
         You must reply with a valid JSON object matching this exact schema:
         {
             "status": "FOCUSED" or "DISTRACTED",
-            "observation": "A short, 1-sentence description of exactly what the user is doing on screen right now (e.g. 'Watching a YouTube video about React', 'Scrolling through Twitter feed', 'Reading API documentation')."
+            "observation": "A short, 1-sentence description of exactly what the user is doing on screen right now (e.g. 'Practicing commands in Terminal', 'Scrolling through Twitter feed', 'Reading API documentation')."
         }
         Reply ONLY with the raw JSON object, no markdown formatting or backticks.
         """
@@ -465,8 +468,14 @@ struct TrackingView: View {
                     .font(.system(size: 40, weight: .black))
                     .foregroundColor(.red)
                 
-                Text("Your session was stopped because you lost focus.")
+                Text("Reason: \(appState.latestObservation)")
                     .font(.headline)
+                    .foregroundColor(.primary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+                
+                Text("Your session was stopped because you lost focus.")
+                    .font(.subheadline)
                     .foregroundColor(.secondary)
             } else {
                 Text("FOCUSED")
